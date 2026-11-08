@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Modo Cuadro</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;0,600;1,500&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; overflow: hidden; cursor: none; }
+  body {
+    /* Pared: tono cálido oscuro con una luz suave arriba, como en un museo */
+    background:
+      radial-gradient(ellipse 70% 55% at 50% 8%, rgba(255,226,170,.16), transparent 70%),
+      radial-gradient(ellipse 120% 90% at 50% 50%, #2b2420 0%, #1a1513 60%, #0f0c0b 100%);
+    font-family: 'Cormorant Garamond', Georgia, serif;
+    color: #e9dcc3;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #stage { position: relative; display: flex; flex-direction: column; align-items: center; }
+
+  .frame {
+    position: relative;
+    padding: 2.4vh;                      /* grosor de la moldura */
+    background:
+      linear-gradient(135deg, #f6dc8f 0%, #b8862f 18%, #7a5418 35%, #d9ae55 52%, #8a611f 70%, #f0cf7c 86%, #9c7228 100%);
+    box-shadow:
+      0 3vh 6vh rgba(0,0,0,.65),
+      0 1vh 2vh rgba(0,0,0,.5),
+      inset 0 0 0 .35vh #5e3f10,
+      inset 0 0 0 .7vh #e8c46c,
+      inset 0 0 0 1.1vh #7d5719,
+      inset .6vh .6vh 1.2vh rgba(255,240,190,.55),
+      inset -.6vh -.6vh 1.2vh rgba(40,25,5,.7);
+    transition: opacity 2.2s ease;
+  }
+  .mat {
+    /* paspartú color marfil */
+    padding: 4vh;
+    background: #efe7d6;
+    box-shadow: inset 0 0 1.5vh rgba(0,0,0,.35);
+  }
+  .bevel {
+    padding: .5vh;
+    background: #fbf7ee;
+    box-shadow: inset 0 0 0 1px rgba(0,0,0,.08);
+  }
+  .bevel img { display: block; }
+
+  .plaque {
+    margin-top: 3.2vh;
+    padding: 1.1vh 2.6vh;
+    text-align: center;
+    background: linear-gradient(180deg, #d9bc77, #a9853d);
+    color: #2a1d08;
+    border-radius: .4vh;
+    box-shadow: 0 .6vh 1.4vh rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.5);
+    transition: opacity 2.2s ease;
+    max-width: 60vw;
+  }
+  .plaque .t { font-size: 2.6vh; font-style: italic; font-weight: 600; line-height: 1.15; }
+  .plaque .a { font-size: 1.9vh; font-weight: 500; letter-spacing: .05em; }
+  .hidden-plaque .plaque { display: none; }
+
+  .fade { opacity: 0; }
+
+  /* atenuación nocturna */
+  #night { position: fixed; inset: 0; background: #000; opacity: 0; pointer-events: none; transition: opacity 4s ease; }
+
+  /* ayuda de controles, aparece al tocar una tecla */
+  #help {
+    position: fixed; bottom: 3vh; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,.7); color: #eee; font-family: system-ui, sans-serif;
+    font-size: 1.8vh; padding: 1.2vh 2.4vh; border-radius: 1vh;
+    opacity: 0; transition: opacity .6s ease; pointer-events: none; white-space: nowrap;
+  }
+  #help.show { opacity: 1; }
+  #loading { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 3vh; font-style: italic; opacity: .7; }
+</style>
+</head>
+<body>
+<div id="loading">Colgando la obra…</div>
+<div id="stage" style="display:none">
+  <div class="frame" id="frame">
+    <div class="mat"><div class="bevel"><img id="art" alt=""></div></div>
+  </div>
+  <div class="plaque" id="plaque"><div class="t" id="title"></div><div class="a" id="artist"></div></div>
+</div>
+<div id="night"></div>
+<div id="help">◀ ▶ cambiar obra · OK mostrar/ocultar placa · ▲ ▼ brillo</div>
+
+<script>
+/* ====== CONFIGURACIÓN ====== */
+var MINUTOS_POR_OBRA = 10;       // cada cuánto cambia la pintura
+var HORA_NOCHE_INICIO = 23;      // desde esta hora se atenúa
+var HORA_NOCHE_FIN = 7;          // hasta esta hora
+var ATENUACION_NOCHE = 0.55;     // 0 = nada, 1 = negro total
+var ALEATORIO = true;            // orden al azar
+
+/* Pinturas clásicas de dominio público, servidas desde Wikimedia Commons */
+var OBRAS = [
+  ["Tsunami_by_hokusai_19th_century.jpg", "La gran ola de Kanagawa", "Katsushika Hokusai, c. 1831"],
+  ["Van_Gogh_-_Starry_Night_-_Google_Art_Project.jpg", "La noche estrellada", "Vincent van Gogh, 1889"],
+  ["Mona_Lisa,_by_Leonardo_da_Vinci,_from_C2RMF_retouched.jpg", "La Gioconda", "Leonardo da Vinci, c. 1503"],
+  ["1665_Girl_with_a_Pearl_Earring.jpg", "La joven de la perla", "Johannes Vermeer, c. 1665"],
+  ["Claude_Monet,_Impression,_soleil_levant.jpg", "Impresión, sol naciente", "Claude Monet, 1872"],
+  ["Sandro_Botticelli_-_La_nascita_di_Venere_-_Google_Art_Project_-_edited.jpg", "El nacimiento de Venus", "Sandro Botticelli, c. 1485"],
+  ["Caspar_David_Friedrich_-_Wanderer_above_the_sea_of_fog.jpg", "El caminante sobre el mar de nubes", "Caspar David Friedrich, 1818"],
+  ["The_Kiss_-_Gustav_Klimt_-_Google_Cultural_Institute.jpg", "El beso", "Gustav Klimt, 1908"],
+  ["Johannes_Vermeer_-_Het_melkmeisje_-_Google_Art_Project.jpg", "La lechera", "Johannes Vermeer, c. 1658"],
+  ["The_Night_Watch_-_HD.jpg", "La ronda de noche", "Rembrandt, 1642"],
+  ["Pieter_Bruegel_the_Elder_-_Hunters_in_the_Snow_(Winter)_-_Google_Art_Project.jpg", "Cazadores en la nieve", "Pieter Bruegel el Viejo, 1565"],
+  ["Georges_Seurat_-_A_Sunday_on_La_Grande_Jatte_--_1884_-_Google_Art_Project.jpg", "Tarde de domingo en la isla de La Grande Jatte", "Georges Seurat, 1884"],
+  ["Claude_Monet_-_Woman_with_a_Parasol_-_Madame_Monet_and_Her_Son_-_Google_Art_Project.jpg", "Mujer con sombrilla", "Claude Monet, 1875"],
+  ["Claude_Monet_-_Water_Lilies_-_1906,_Ryerson.jpg", "Nenúfares", "Claude Monet, 1906"],
+  ["Edvard_Munch,_1893,_The_Scream,_oil,_tempera_and_pastel_on_cardboard,_91_x_73_cm,_National_Gallery_of_Norway.jpg", "El grito", "Edvard Munch, 1893"],
+  ["Vincent_Willem_van_Gogh_127.jpg", "Los girasoles", "Vincent van Gogh, 1888"],
+  ["Jan_van_Eyck_-_The_Arnolfini_Portrait_-_Google_Art_Project.jpg", "El matrimonio Arnolfini", "Jan van Eyck, 1434"],
+  ["John_William_Waterhouse_-_The_Lady_of_Shalott_-_Google_Art_Project_edit.jpg", "La dama de Shalott", "John William Waterhouse, 1888"]
+];
+
+/* ====== LÓGICA ====== */
+var img = document.getElementById('art');
+var frame = document.getElementById('frame');
+var plaque = document.getElementById('plaque');
+var night = document.getElementById('night');
+var help = document.getElementById('help');
+var orden = [], pos = -1, timer = null, brilloManual = 0, fallos = 0;
+
+function url(f) {
+  return 'https://commons.wikimedia.org/wiki/Special:FilePath/' + encodeURIComponent(f) + '?width=2400';
+}
+function barajar() {
+  orden = OBRAS.map(function (_, i) { return i; });
+  if (ALEATORIO) for (var i = orden.length - 1; i > 0; i--) {
+    var j = Math.floor(Math.random() * (i + 1)); var t = orden[i]; orden[i] = orden[j]; orden[j] = t;
+  }
+}
+function ajustar(w, h) {
+  // espacio disponible para la imagen, descontando marco, paspartú y placa
+  var vh = window.innerHeight / 100, vw = window.innerWidth / 100;
+  var placa = document.body.classList.contains('hidden-plaque') ? 0 : 11 * vh;
+  var maxH = window.innerHeight - placa - 22 * vh;
+  var maxW = window.innerWidth * 0.86 - 14 * vh;
+  var s = Math.min(maxW / w, maxH / h);
+  img.style.width = Math.round(w * s) + 'px';
+  img.style.height = Math.round(h * s) + 'px';
+}
+function mostrar(dir) {
+  if (!orden.length) barajar();
+  pos = (pos + dir + orden.length) % orden.length;
+  var obra = OBRAS[orden[pos]];
+  var pre = new Image();
+  pre.onload = function () {
+    fallos = 0;
+    frame.classList.add('fade'); plaque.classList.add('fade');
+    setTimeout(function () {
+      img.src = pre.src;
+      ajustar(pre.naturalWidth, pre.naturalHeight);
+      document.getElementById('title').textContent = obra[1];
+      document.getElementById('artist').textContent = obra[2];
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('stage').style.display = 'flex';
+      frame.classList.remove('fade'); plaque.classList.remove('fade');
+    }, document.getElementById('stage').style.display === 'none' ? 0 : 2200);
+  };
+  pre.onerror = function () {          // si una imagen no carga, pasa a la siguiente
+    if (++fallos < OBRAS.length) mostrar(dir || 1);
+    else document.getElementById('loading').textContent = 'No se pudieron cargar las obras. Revisa la conexión.';
+  };
+  pre.src = url(obra[0]);
+  reiniciarTimer();
+}
+function reiniciarTimer() {
+  clearInterval(timer);
+  timer = setInterval(function () { mostrar(1); }, MINUTOS_POR_OBRA * 60000);
+}
+function aplicarBrillo() {
+  var h = new Date().getHours();
+  var esNoche = HORA_NOCHE_INICIO > HORA_NOCHE_FIN
+    ? (h >= HORA_NOCHE_INICIO || h < HORA_NOCHE_FIN)
+    : (h >= HORA_NOCHE_INICIO && h < HORA_NOCHE_FIN);
+  var base = esNoche ? ATENUACION_NOCHE : 0;
+  night.style.opacity = Math.max(0, Math.min(0.9, base + brilloManual));
+}
+var helpTimer;
+function ayuda() {
+  help.classList.add('show'); clearTimeout(helpTimer);
+  helpTimer = setTimeout(function () { help.classList.remove('show'); }, 3000);
+}
+
+document.addEventListener('keydown', function (e) {
+  var k = e.keyCode;
+  if (k === 39) mostrar(1);                       // derecha
+  else if (k === 37) mostrar(-1);                 // izquierda
+  else if (k === 13) {                            // OK / Enter
+    document.body.classList.toggle('hidden-plaque');
+    if (img.naturalWidth) ajustar(img.naturalWidth, img.naturalHeight);
+  }
+  else if (k === 38) { brilloManual = Math.max(-0.6, brilloManual - 0.1); aplicarBrillo(); } // arriba = más brillo
+  else if (k === 40) { brilloManual = Math.min(0.8, brilloManual + 0.1); aplicarBrillo(); }  // abajo = menos brillo
+  else return;
+  e.preventDefault(); ayuda();
+});
+// en pantallas táctiles o con mouse: mitad izquierda/derecha
+document.addEventListener('click', function (e) {
+  mostrar(e.clientX < window.innerWidth / 2 ? -1 : 1); ayuda();
+});
+window.addEventListener('resize', function () {
+  if (img.naturalWidth) ajustar(img.naturalWidth, img.naturalHeight);
+});
+
+// evitar que la pantalla se apague (si el navegador lo permite)
+function pedirWakeLock() {
+  try { if (navigator.wakeLock) navigator.wakeLock.request('screen').catch(function () {}); } catch (e) {}
+}
+document.addEventListener('visibilitychange', function () { if (!document.hidden) pedirWakeLock(); });
+
+barajar(); mostrar(1); aplicarBrillo(); pedirWakeLock();
+setInterval(aplicarBrillo, 60000);
+</script>
+</body>
+</html>
