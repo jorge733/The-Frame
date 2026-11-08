@@ -43,10 +43,13 @@
     filter: blur(40px) brightness(.55) saturate(1.1);
   }
   .layer .fg {
-    position: absolute; inset: 0;
+    position: absolute; inset: 0; will-change: transform;
     background-repeat: no-repeat; background-position: center;
   }
   .fade { opacity: 0; }
+  /* acercamiento muy lento: la imagen nunca queda 100% quieta */
+  @keyframes respirar { from { transform: scale(1); } to { transform: scale(1.04) translate(-.6%, -.4%); } }
+  @media (prefers-reduced-motion: reduce) { .layer .fg { animation: none !important; } }
 
   .plaque {
     position: absolute; right: 2.5vh; bottom: 2.5vh;
@@ -77,22 +80,39 @@
   <div class="layer fade" id="B"><div class="bg"></div><div class="fg"></div></div>
   <div class="plaque" id="plaque"><div class="t" id="title"></div><div class="a" id="artist"></div></div>
 </div></div></div>
-<div id="loading">Colgando la obra…</div>
+<div id="loading" role="status">Colgando la obra…</div>
 <div id="night"></div>
-<div id="help">◀ ▶ cambiar obra · OK placa · ▲ ▼ brillo</div>
+<div id="help">◀ ▶ cambiar obra · OK placa · ▲ ▼ brillo · ⏯ pausa</div>
 
 <script>
-/* ====== CONFIGURACIÓN ====== */
+/* ====== CONFIGURACIÓN ======
+   Todo se puede cambiar también desde la URL, por ejemplo:
+   index.html?minutos=5&placa=0&aleatorio=0&movimiento=0                         */
 var MINUTOS_POR_OBRA = 10;       // cada cuánto cambia la pintura
 var HORA_NOCHE_INICIO = 23;      // desde esta hora se atenúa
 var HORA_NOCHE_FIN = 7;          // hasta esta hora
 var ATENUACION_NOCHE = 0.55;     // 0 = nada, 1 = negro total
 var ALEATORIO = true;            // orden al azar
 var SEGUNDOS_PLACA = 8;          // la placa aparece unos segundos al cambiar de obra (0 = nunca)
+var MOVIMIENTO_SUAVE = true;     // acercamiento lentísimo de la imagen (evita marcas en pantallas OLED)
 // Si la forma de la pintura se parece a la de la pantalla, se recorta para llenarla entera.
 // Si es muy distinta (por ejemplo, un retrato vertical), se muestra completa sobre un fondo
 // difuminado de la misma pintura, así igual se cubre toda la pantalla sin franjas negras.
 var TOLERANCIA_RECORTE = 0.35;
+
+(function leerURL() {
+  var q = {};
+  location.search.replace(/[?&]([^=&]+)=?([^&]*)/g, function (_, k, v) { q[k] = decodeURIComponent(v); });
+  function num(k, d) { var n = parseFloat(q[k]); return isNaN(n) ? d : n; }
+  function bool(k, d) { return k in q ? !/^(0|no|false)$/i.test(q[k]) : d; }
+  MINUTOS_POR_OBRA = Math.max(0.1, num('minutos', MINUTOS_POR_OBRA));
+  HORA_NOCHE_INICIO = num('noche', HORA_NOCHE_INICIO);
+  HORA_NOCHE_FIN = num('dia', HORA_NOCHE_FIN);
+  ATENUACION_NOCHE = num('atenuacion', ATENUACION_NOCHE);
+  SEGUNDOS_PLACA = num('placa', SEGUNDOS_PLACA);
+  ALEATORIO = bool('aleatorio', ALEATORIO);
+  MOVIMIENTO_SUAVE = bool('movimiento', MOVIMIENTO_SUAVE);
+})();
 
 /* Pinturas clásicas de dominio público, servidas desde Wikimedia Commons */
 var OBRAS = [
@@ -117,85 +137,189 @@ var OBRAS = [
 ];
 
 /* ====== LÓGICA ====== */
-var win = document.getElementById('window');
-var capas = [document.getElementById('A'), document.getElementById('B')];
+var $ = function (id) { return document.getElementById(id); };
+var win = $('window'), night = $('night'), help = $('help'), loading = $('loading');
+var capas = [$('A'), $('B')];
 var activa = 0, primera = true;
-var night = document.getElementById('night');
-var help = document.getElementById('help');
-var orden = [], pos = -1, timer = null, brilloManual = 0, fallos = 0, placaTimer;
+var orden = [], pos = -1, timer = null, placaTimer = null, helpTimer = null;
+var pedido = 0;                 // identifica la última petición, para descartar cargas viejas
+var rotas = {};                 // obras que fallaron y no se vuelven a intentar en esta sesión
+var cache = {};                 // imágenes ya precargadas
+var pausado = false;
 
-function url(f) {
-  return 'https://commons.wikimedia.org/wiki/Special:FilePath/' + encodeURIComponent(f) + '?width=2400';
+/* Preferencias que se recuerdan entre reinicios */
+function leerPref(k, d) { try { var v = localStorage.getItem('cuadro.' + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } }
+function guardarPref(k, v) { try { localStorage.setItem('cuadro.' + k, JSON.stringify(v)); } catch (e) {} }
+var brilloManual = leerPref('brillo', 0);
+var placaFija = leerPref('placaFija', false);
+
+/* Wikimedia sirve miniaturas en tamaños estándar: se pide el más chico que llene la pantalla */
+function anchoIdeal() {
+  var px = Math.max(screen.width || 0, screen.height || 0, window.innerWidth) * (window.devicePixelRatio || 1);
+  var pasos = [960, 1280, 1920, 3840];
+  for (var i = 0; i < pasos.length; i++) if (pasos[i] >= px * 0.9) return pasos[i];
+  return pasos[pasos.length - 1];
 }
+var ANCHO = anchoIdeal();
+function url(f) {
+  return 'https://commons.wikimedia.org/wiki/Special:FilePath/' + encodeURIComponent(f) + '?width=' + ANCHO;
+}
+
 function barajar() {
+  var ultima = orden[pos];
   orden = OBRAS.map(function (_, i) { return i; });
-  if (ALEATORIO) for (var i = orden.length - 1; i > 0; i--) {
-    var j = Math.floor(Math.random() * (i + 1)); var t = orden[i]; orden[i] = orden[j]; orden[j] = t;
+  if (ALEATORIO) {
+    for (var i = orden.length - 1; i > 0; i--) {
+      var j = Math.floor(Math.random() * (i + 1)); var t = orden[i]; orden[i] = orden[j]; orden[j] = t;
+    }
+    // que la nueva vuelta no empiece con la misma obra con la que terminó la anterior
+    if (orden.length > 1 && orden[0] === ultima) { orden[0] = orden[1]; orden[1] = ultima; }
   }
 }
+
+function cargar(i, listo, fallo) {
+  var c = cache[i];
+  if (c && c.ok) return listo(c.img);
+  var img = (c && c.img) || new Image();
+  cache[i] = { img: img, ok: false };
+  img.onload = function () { cache[i].ok = true; listo && listo(img); };
+  img.onerror = function () { delete cache[i]; fallo && fallo(); };
+  if (!img.src) img.src = url(OBRAS[i][0]);
+  else if (img.complete && img.naturalWidth) img.onload();
+}
+
 function pintarCapa(capa, src, w, h) {
   var bg = capa.querySelector('.bg'), fg = capa.querySelector('.fg');
   var css = 'url("' + src + '")';
   bg.style.backgroundImage = css;
   fg.style.backgroundImage = css;
   var rImg = w / h, rWin = win.clientWidth / win.clientHeight;
-  var dif = Math.abs(Math.log(rImg / rWin));
-  var cubrir = dif <= TOLERANCIA_RECORTE;
+  var cubrir = Math.abs(Math.log(rImg / rWin)) <= TOLERANCIA_RECORTE;
   fg.style.backgroundSize = cubrir ? 'cover' : 'contain';
   bg.style.display = cubrir ? 'none' : 'block';
   // en retratos recortados, privilegia la parte superior (las caras)
   fg.style.backgroundPosition = rImg < rWin ? 'center 30%' : 'center';
-  fg.style.boxShadow = cubrir ? 'none' : '0 0 3vh rgba(0,0,0,.6)';
+  fg.style.filter = cubrir ? 'none' : 'drop-shadow(0 0 3vh rgba(0,0,0,.6))';
 }
+
+function siguienteIndice(dir) {
+  // busca la próxima obra que no esté marcada como rota
+  for (var n = 0; n < orden.length; n++) {
+    pos += dir;
+    if (pos >= orden.length) { barajar(); pos = 0; }
+    else if (pos < 0) pos = orden.length - 1;
+    if (!rotas[orden[pos]]) return orden[pos];
+  }
+  return -1;
+}
+
 function mostrar(dir) {
+  dir = dir || 1;
   if (!orden.length) barajar();
-  pos = (pos + dir + orden.length) % orden.length;
-  var obra = OBRAS[orden[pos]];
-  var pre = new Image();
-  pre.onload = function () {
-    fallos = 0;
-    var siguiente = primera ? activa : 1 - activa;
-    pintarCapa(capas[siguiente], pre.src, pre.naturalWidth, pre.naturalHeight);
-    capas[siguiente].dataset.w = pre.naturalWidth; capas[siguiente].dataset.h = pre.naturalHeight;
-    capas[siguiente].dataset.src = pre.src;
-    capas[siguiente].classList.remove('fade');
-    if (!primera) capas[activa].classList.add('fade');
-    activa = siguiente; primera = false;
-    document.getElementById('loading').style.display = 'none';
-    document.getElementById('title').textContent = obra[1];
-    document.getElementById('artist').textContent = obra[2];
-    if (SEGUNDOS_PLACA > 0) mostrarPlaca(SEGUNDOS_PLACA);
-  };
-  pre.onerror = function () {          // si una imagen no carga, pasa a la siguiente
-    if (++fallos < OBRAS.length) mostrar(dir || 1);
-    else document.getElementById('loading').textContent = 'No se pudieron cargar las obras. Revisa la conexión.';
-  };
-  pre.src = url(obra[0]);
+  var i = siguienteIndice(dir);
+  if (i < 0) return sinConexion();
+  var miPedido = ++pedido;
   reiniciarTimer();
+  cargar(i, function (img) {
+    if (miPedido !== pedido) return;   // el usuario ya pidió otra obra
+    var sig = primera ? activa : 1 - activa;
+    var capa = capas[sig];
+    capa.dataset.w = img.naturalWidth; capa.dataset.h = img.naturalHeight; capa.dataset.src = img.src;
+    pintarCapa(capa, img.src, img.naturalWidth, img.naturalHeight);
+    reiniciarAnimacion(capa);
+    capa.classList.remove('fade');
+    if (!primera) capas[activa].classList.add('fade');
+    activa = sig; primera = false;
+    loading.style.display = 'none';
+    $('title').textContent = OBRAS[i][1];
+    $('artist').textContent = OBRAS[i][2];
+    if (SEGUNDOS_PLACA > 0 || placaFija) mostrarPlaca(SEGUNDOS_PLACA);
+    precargarProxima();
+  }, function () {
+    rotas[i] = true;
+    if (miPedido === pedido) mostrar(dir);   // si una imagen no carga, pasa a la siguiente
+  });
 }
-var placaFija = false;
+
+function precargarProxima() {
+  var p = pos + 1;
+  if (p < orden.length && !rotas[orden[p]]) cargar(orden[p], null, function () { rotas[orden[p]] = true; });
+}
+
+/* Si no carga nada (sin internet), se reintenta solo cada minuto o al volver la conexión */
+var reintento = null;
+function sinConexion() {
+  if (primera) loading.textContent = 'Sin conexión. Reintentando…';
+  clearTimeout(reintento);
+  reintento = setTimeout(function () { rotas = {}; mostrar(1); }, 60000);
+}
+window.addEventListener('online', function () { clearTimeout(reintento); rotas = {}; mostrar(1); });
+
+/* Al terminar el fundido, la capa oculta suelta su imagen para no acumular memoria (TVs con poca RAM) */
+capas.forEach(function (c) {
+  c.addEventListener('transitionend', function (e) {
+    if (e.target !== c || !c.classList.contains('fade')) return;
+    c.querySelector('.bg').style.backgroundImage = '';
+    c.querySelector('.fg').style.backgroundImage = '';
+    delete c.dataset.src;
+  });
+});
+
+function reiniciarAnimacion(capa) {
+  var fg = capa.querySelector('.fg');
+  fg.style.animation = 'none';
+  void fg.offsetWidth;   // fuerza reinicio
+  fg.style.animation = MOVIMIENTO_SUAVE ? 'respirar ' + Math.max(60, MINUTOS_POR_OBRA * 60) + 's ease-in-out infinite alternate' : 'none';
+}
+
 function mostrarPlaca(seg) {
   document.body.classList.remove('hidden-plaque');
   clearTimeout(placaTimer);
   if (!placaFija) placaTimer = setTimeout(function () { document.body.classList.add('hidden-plaque'); }, seg * 1000);
 }
-function reiniciarTimer() {
-  clearInterval(timer);
-  timer = setInterval(function () { mostrar(1); }, MINUTOS_POR_OBRA * 60000);
+function alternarPlaca() {
+  placaFija = document.body.classList.contains('hidden-plaque');
+  guardarPref('placaFija', placaFija);
+  clearTimeout(placaTimer);
+  document.body.classList.toggle('hidden-plaque', !placaFija);
 }
-function aplicarBrillo() {
+
+function reiniciarTimer() {
+  clearTimeout(timer);
+  if (!pausado) timer = setTimeout(function () { mostrar(1); }, MINUTOS_POR_OBRA * 60000);
+}
+function alternarPausa() {
+  pausado = !pausado;
+  reiniciarTimer();
+  aviso(pausado ? '❚❚ Pausado: esta obra queda fija' : '▶ Cambio automático activado');
+}
+
+function esNoche() {
   var h = new Date().getHours();
-  var esNoche = HORA_NOCHE_INICIO > HORA_NOCHE_FIN
+  return HORA_NOCHE_INICIO > HORA_NOCHE_FIN
     ? (h >= HORA_NOCHE_INICIO || h < HORA_NOCHE_FIN)
     : (h >= HORA_NOCHE_INICIO && h < HORA_NOCHE_FIN);
-  var base = esNoche ? ATENUACION_NOCHE : 0;
+}
+function aplicarBrillo() {
+  var base = esNoche() ? ATENUACION_NOCHE : 0;
   night.style.opacity = Math.max(0, Math.min(0.9, base + brilloManual));
 }
-var helpTimer;
-function ayuda() {
-  help.classList.add('show'); clearTimeout(helpTimer);
-  helpTimer = setTimeout(function () { help.classList.remove('show'); }, 3000);
+function cambiarBrillo(d) {
+  // el ajuste manual es relativo a la atenuación automática, sin pasarse de los límites útiles
+  var base = esNoche() ? ATENUACION_NOCHE : 0;
+  brilloManual = Math.max(-base, Math.min(0.9 - base, Math.round((brilloManual + d) * 10) / 10));
+  guardarPref('brillo', brilloManual);
+  aplicarBrillo();
+  aviso('Brillo ' + Math.round((1 - (base + brilloManual)) * 100) + '%');
 }
+
+var TEXTO_AYUDA = help.textContent;
+function aviso(txt) {
+  help.textContent = txt || TEXTO_AYUDA;
+  help.classList.add('show'); clearTimeout(helpTimer);
+  helpTimer = setTimeout(function () { help.classList.remove('show'); }, txt ? 2000 : 4000);
+}
+
 // Pantalla completa real (oculta la barra del navegador). Se activa con la primera tecla o clic.
 function pantallaCompleta() {
   var el = document.documentElement;
@@ -206,36 +330,61 @@ function pantallaCompleta() {
   } catch (e) {}
 }
 
+/* Teclas: flechas del control remoto, más las de canal, avance/retroceso y play/pausa
+   que usan los televisores (Samsung Tizen, LG webOS, Android TV) */
+var TECLAS = {
+  sig:   { 39: 1, 34: 1, 176: 1, 417: 1, 428: 1, ArrowRight: 1, PageDown: 1, MediaTrackNext: 1, MediaFastForward: 1, ChannelDown: 1 },
+  ant:   { 37: 1, 33: 1, 177: 1, 412: 1, 427: 1, ArrowLeft: 1, PageUp: 1, MediaTrackPrevious: 1, MediaRewind: 1, ChannelUp: 1 },
+  ok:    { 13: 1, 457: 1, Enter: 1, Info: 1 },
+  mas:   { 38: 1, ArrowUp: 1 },
+  menos: { 40: 1, ArrowDown: 1 },
+  pausa: { 19: 1, 32: 1, 179: 1, 415: 1, 10252: 1, Pause: 1, MediaPlayPause: 1, MediaPlay: 1, MediaPause: 1, ' ': 1 }
+};
+function es(tipo, e) { return TECLAS[tipo][e.key] || TECLAS[tipo][e.keyCode]; }
+
 document.addEventListener('keydown', function (e) {
-  var k = e.keyCode;
   pantallaCompleta();
-  if (k === 39) mostrar(1);                       // derecha
-  else if (k === 37) mostrar(-1);                 // izquierda
-  else if (k === 13) {                            // OK / Enter: fija u oculta la placa
-    placaFija = document.body.classList.contains('hidden-plaque');
-    clearTimeout(placaTimer);
-    document.body.classList.toggle('hidden-plaque', !placaFija);
-  }
-  else if (k === 38) { brilloManual = Math.max(-0.6, brilloManual - 0.1); aplicarBrillo(); } // más brillo
-  else if (k === 40) { brilloManual = Math.min(0.8, brilloManual + 0.1); aplicarBrillo(); }  // menos brillo
+  if (es('sig', e)) { mostrar(1); aviso(); }
+  else if (es('ant', e)) { mostrar(-1); aviso(); }
+  else if (es('ok', e)) { alternarPlaca(); aviso(); }
+  else if (es('mas', e)) cambiarBrillo(-0.1);
+  else if (es('menos', e)) cambiarBrillo(0.1);
+  else if (es('pausa', e)) alternarPausa();
   else return;
-  e.preventDefault(); ayuda();
+  e.preventDefault();
+});
+
+/* Clic o toque: mitad izquierda = anterior, derecha = siguiente. Deslizar también funciona. */
+var toque = null;
+document.addEventListener('touchstart', function (e) { toque = e.touches[0]; }, { passive: true });
+document.addEventListener('touchend', function (e) {
+  if (!toque) return;
+  var dx = e.changedTouches[0].clientX - toque.clientX;
+  if (Math.abs(dx) > 50) { pantallaCompleta(); mostrar(dx < 0 ? 1 : -1); aviso(); e.preventDefault(); }
+  toque = null;
 });
 document.addEventListener('click', function (e) {
   pantallaCompleta();
-  mostrar(e.clientX < window.innerWidth / 2 ? -1 : 1); ayuda();
-});
-window.addEventListener('resize', function () {
-  var c = capas[activa];
-  if (c.dataset.src) pintarCapa(c, c.dataset.src, +c.dataset.w, +c.dataset.h);
+  mostrar(e.clientX < window.innerWidth / 2 ? -1 : 1); aviso();
 });
 
+var resizeTimer;
+window.addEventListener('resize', function () {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(function () {
+    capas.forEach(function (c) { if (c.dataset.src) pintarCapa(c, c.dataset.src, +c.dataset.w, +c.dataset.h); });
+  }, 200);
+});
+
+/* Mantiene la pantalla encendida mientras la página esté visible */
 function pedirWakeLock() {
   try { if (navigator.wakeLock) navigator.wakeLock.request('screen').catch(function () {}); } catch (e) {}
 }
-document.addEventListener('visibilitychange', function () { if (!document.hidden) pedirWakeLock(); });
+document.addEventListener('visibilitychange', function () { if (!document.hidden) { pedirWakeLock(); aplicarBrillo(); } });
 
+if (placaFija) document.body.classList.remove('hidden-plaque');
 barajar(); mostrar(1); aplicarBrillo(); pedirWakeLock();
+setTimeout(function () { aviso(); }, 1500);   // muestra los controles una vez al empezar
 setInterval(aplicarBrillo, 60000);
 </script>
 </body>
